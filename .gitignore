@@ -1,0 +1,6 @@
+data/
+docs/
+*.ipynb
+*.pyc
+__pycache__/
+.venv/
