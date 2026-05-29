@@ -26,10 +26,15 @@ class CASIABPose(InMemoryDataset):
         split: str = 'train', 
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
-        pre_filter: Optional[Callable] = None   
+        pre_filter: Optional[Callable] = None,
+        num_subjects: Optional[int] = None
     ):
         self.split = split
-        self.ids = self.split_ids[self.split] 
+        self.ids = self.split_ids[self.split]
+        self.num_subjects = num_subjects
+        
+        if num_subjects is not None:
+            self.ids = self.ids[:num_subjects]
 
         super().__init__(root, transform, pre_transform, pre_filter)
         
@@ -37,7 +42,8 @@ class CASIABPose(InMemoryDataset):
 
     @property
     def processed_file_names(self) -> str:
-        return f'casia_b_{self.split}.pt'
+        suffix = f'_{self.num_subjects}sub' if self.num_subjects else ''
+        return f'casia_b_{self.split}{suffix}.pt'
 
     def process(self):
         path = osp.join(self.root, 'casia-b', 'casia-b_pose_coco.csv')
