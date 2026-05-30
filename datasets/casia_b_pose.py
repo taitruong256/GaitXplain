@@ -6,10 +6,67 @@ import numpy as np
 import torch
 import warnings
 
+from datasets.graph import Graph
+from transforms.augmentation import (
+    JointNoise,
+    PadSequence,
+    PointNoise,
+    RandomFlipLeftRight,
+    RandomFlipSequence,
+    RandomMove,
+    RandomSelectSequence,
+    SelectSequenceCenter,
+    ShuffleSequence,
+)
+
 warnings.filterwarnings(
     "ignore",
     category=UserWarning
 )
+
+
+class Compose:
+    def __init__(self, transforms):
+        self.transforms = transforms
+
+    def __call__(self, data):
+        for transform in self.transforms:
+            data = transform(data)
+        return data
+
+
+def build_default_transform(split: str, sequence_length: int, graph: Graph):
+    if split == 'train':
+        return Compose([
+            PadSequence(sequence_length),
+            RandomFlipSequence(0.5),
+            RandomSelectSequence(sequence_length),
+            ShuffleSequence(False),
+            RandomFlipLeftRight(0.5, flip_idx=graph.flip_idx),
+            JointNoise(0.5),
+            PointNoise(0.1),
+            RandomMove((3, 1)),
+        ])
+
+    return Compose([
+        PadSequence(sequence_length),
+        SelectSequenceCenter(sequence_length),
+        ShuffleSequence(False),
+    ])
+
+
+def build_transform(split: str, sequence_length: int, graph: Graph, use_augmentation: bool | None = None):
+    if use_augmentation is None:
+        use_augmentation = split == 'train'
+
+    if use_augmentation and split == 'train':
+        return build_default_transform(split, sequence_length, graph)
+
+    return Compose([
+        PadSequence(sequence_length),
+        SelectSequenceCenter(sequence_length),
+        ShuffleSequence(False),
+    ])
 
 class CASIABPose(InMemoryDataset):
     mapping_walking_status = {
@@ -24,6 +81,8 @@ class CASIABPose(InMemoryDataset):
         self, 
         root: str = 'data', 
         split: str = 'train', 
+        sequence_length: int = 99,
+        use_augmentation: bool | None = None,
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
         pre_filter: Optional[Callable] = None,
@@ -32,6 +91,12 @@ class CASIABPose(InMemoryDataset):
         self.split = split
         self.ids = self.split_ids[self.split]
         self.num_subjects = num_subjects
+        self.sequence_length = sequence_length
+        self.graph = Graph('coco')
+        self.use_augmentation = use_augmentation if use_augmentation is not None else split == 'train'
+
+        if transform is None:
+            transform = build_transform(self.split, self.sequence_length, self.graph, self.use_augmentation)
         
         if num_subjects is not None:
             self.ids = self.ids[:num_subjects]
@@ -67,7 +132,7 @@ class CASIABPose(InMemoryDataset):
                 sequences[key] = []
 
             sequences[key].append(
-                torch.tensor(keypoints.reshape(-1, 3))
+                torch.tensor(keypoints.reshape(-1, 3), dtype=torch.float32)
             )
     
         data_list = []

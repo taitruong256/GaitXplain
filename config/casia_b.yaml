@@ -24,6 +24,7 @@ training:
   num_workers: 4
   save_interval: 10
   num_subjects: 10
+  use_augmentation: true
 
 inference:
   output_root: output

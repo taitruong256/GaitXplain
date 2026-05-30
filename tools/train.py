@@ -43,6 +43,7 @@ def train():
     parser.add_argument('--config', default='config/casia_b.yaml')
     parser.add_argument('--output', default=None)
     parser.add_argument('--num-subjects', type=int, default=None)
+    parser.add_argument('--use-augmentation', action='store_true', default=None)
     args = parser.parse_args()
     
     with open(args.config) as f:
@@ -58,6 +59,10 @@ def train():
     num_subjects = args.num_subjects
     if num_subjects is None:
         num_subjects = config['training'].get('num_subjects')
+
+    use_augmentation = args.use_augmentation
+    if use_augmentation is None:
+        use_augmentation = config['training'].get('use_augmentation', True)
 
     device = torch.device(config['training']['device'])
     
@@ -80,6 +85,8 @@ def train():
     dataset = CASIABPose(
         split='train',
         root=config['data']['root'],
+        sequence_length=config['data']['num_frames'],
+        use_augmentation=use_augmentation,
         num_subjects=num_subjects,
     )
     batch_size = config['training'].get('batch_size', 32)
@@ -95,12 +102,13 @@ def train():
 
     logger.info('Number of training samples: %d', len(dataset))
     logger.info('Batch size: %d | Num batches: %d', batch_size, len(train_loader))
+    logger.info('Augmentation enabled: %s', use_augmentation)
     for i in range(5):
         logger.info('Sample %d - x shape: %s, y: %s', i, dataset[i].x.shape, dataset[i].y)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
     criterion = nn.CrossEntropyLoss()
-    best_score = float('-inf')
+    best_score = float('inf') 
     best_path = None
     last_path = run_dir / 'last.pth'
     
@@ -143,12 +151,19 @@ def train():
             logger.info('Validation summary:')
             for k, v in summary.items():
                 logger.info('  %s: %.4f', k, v)
-            if summary['mean'] > best_score:
-                best_score = summary['mean']
-                val_loss = summary.get('loss', 0.0)
-                best_path = run_dir / f'best_epoch_{epoch+1:02d}_loss_{val_loss:.4f}.pth'
-                torch.save(torch.load(last_path, map_location='cpu', weights_only=False), best_path)
-                logger.info('New best checkpoint saved: %s', best_path)
+            
+            val_loss = summary.get('loss', float('inf'))
+            if val_loss < best_score:
+                best_score = val_loss
+                new_best_path = run_dir / f'best_epoch_{epoch+1:02d}_loss_{val_loss:.4f}.pth'
+                torch.save(torch.load(last_path, map_location='cpu', weights_only=False), new_best_path)
+                logger.info('New best checkpoint saved: %s', new_best_path)
+                
+                if best_path is not None and best_path.exists():
+                    best_path.unlink()
+                    logger.info('Deleted old best checkpoint: %s', best_path)
+                
+                best_path = new_best_path
         except Exception as e:
             logger.exception('Validation failed: %s', e)
 
