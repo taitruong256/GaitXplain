@@ -106,6 +106,12 @@ class CASIABPose(InMemoryDataset):
         
         self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
+    @staticmethod
+    def to_protogcn_input(x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f'Expected [T, V, C] got {tuple(x.shape)}')
+        return x.unsqueeze(0)
+
     @property
     def processed_file_names(self) -> str:
         suffix = f'_{self.num_subjects}sub' if self.num_subjects else ''

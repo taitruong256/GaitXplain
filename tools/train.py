@@ -10,10 +10,23 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from models import GaitXplain, ProtoGCN
+from models import GaitXplain, ProtoGCNCASIA
 from datasets.casia_b_pose import CASIABPose
 from tools import evaluate as evaluator
 from tools.run_utils import make_run_dir, save_config_snapshot, setup_run_logging
+def build_optimizer(model):
+    return torch.optim.SGD(
+        model.parameters(),
+        lr=0.025,
+        momentum=0.9,
+        weight_decay=0.0005,
+        nesterov=True,
+    )
+
+
+def build_scheduler(optimizer):
+    return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=150, eta_min=0)
+
 
 
 def collate_pose_batch(batch, num_frames):
@@ -73,21 +86,8 @@ def train():
         model_num_classes = num_subjects
 
     model_name = m_cfg.get('name', 'GaitXplain')
-    if model_name.lower() == 'protogcn' or model_name.lower() == 'proto_gcn':
-        model = ProtoGCN(
-            graph_cfg=m_cfg.get('graph_cfg', {'dataset': config.get('dataset', 'coco')}),
-            in_channels=m_cfg.get('in_channels', 3),
-            base_channels=m_cfg.get('base_channels', 96),
-            ch_ratio=m_cfg.get('ch_ratio', 2),
-            num_stages=m_cfg.get('num_stages', 10),
-            inflate_stages=tuple(m_cfg.get('inflate_stages', (5, 8))),
-            down_stages=tuple(m_cfg.get('down_stages', (5, 8))),
-            data_bn_type=m_cfg.get('data_bn_type', 'VC'),
-            num_person=m_cfg.get('num_person', 1),
-            num_classes=model_num_classes,
-            dropout=m_cfg.get('dropout', 0.5),
-            num_prototype=m_cfg.get('num_prototype', 100),
-        ).to(device)
+    if model_name.lower() in ('protogcn', 'proto_gcn'):
+        model = ProtoGCNCASIA(num_classes=model_num_classes, num_person=1).to(device)
     else:
         model = GaitXplain(
             in_channels=m_cfg.get('in_channels', 3),
@@ -97,6 +97,13 @@ def train():
             dropout=m_cfg.get('dropout', 0.5),
         ).to(device)
     logger.info('%s', model)
+    # initialize weights
+    if hasattr(model, 'init_weights'):
+        try:
+            model.init_weights()
+            logger.info('Model weights initialized via init_weights()')
+        except Exception:
+            logger.exception('init_weights() failed')
     logger.info('Total parameters: %d', sum(p.numel() for p in model.parameters()))
     
     dataset = CASIABPose(
@@ -123,9 +130,10 @@ def train():
     for i in range(5):
         logger.info('Sample %d - x shape: %s, y: %s', i, dataset[i].x.shape, dataset[i].y)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
+    optimizer = build_optimizer(model) if model_name.lower() in ('protogcn', 'proto_gcn') else torch.optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
+    scheduler = build_scheduler(optimizer) if model_name.lower() in ('protogcn', 'proto_gcn') else None
     criterion = nn.CrossEntropyLoss()
-    best_score = float('inf') 
+    best_score = float('-inf') 
     best_path = None
     last_path = run_dir / 'last.pth'
     
@@ -139,40 +147,57 @@ def train():
             y = y.to(device)
             
             optimizer.zero_grad()
-            logits = model(x)
-            loss = criterion(logits, y)
+            # Request embeddings/logits for debug when available
+            result = model(x, labels=y, return_embedding=True)
+            if isinstance(result, tuple) and len(result) >= 2:
+                losses_dict, logits, embedding = result
+            else:
+                losses_dict = result
+                logits = None
+
+            loss = losses_dict['loss_cls'] if isinstance(losses_dict, dict) else losses_dict
             loss.backward()
             optimizer.step()
             
             train_loss += loss.item()
+
+            # Lightweight diagnostics for first epoch first few batches
+            if epoch == 0 and batch_idx <= 3:
+                try:
+                    if logits is not None:
+                        l_mean = logits.detach().cpu().mean().item()
+                        l_std = logits.detach().cpu().std().item()
+                        logger.info('Batch %d logits mean=%.4f std=%.4f', batch_idx, l_mean, l_std)
+                    unique_labels = torch.unique(y.cpu())
+                    logger.info('Batch %d unique labels=%s', batch_idx, unique_labels.tolist())
+                    # compute grad norm
+                    grad_norm = 0.0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            grad_norm += float(p.grad.detach().norm().item() ** 2)
+                    grad_norm = grad_norm ** 0.5
+                    logger.info('Batch %d grad_norm=%.6f', batch_idx, grad_norm)
+                except Exception:
+                    logger.exception('Debug logging failed')
 
             pbar.set_postfix(batch_loss=f'{loss.item():.4f}', avg_loss=f'{(train_loss / batch_idx):.4f}')
         
         avg_loss = train_loss / max(len(train_loader), 1)
         logger.info('Epoch %d - Loss: %.4f', epoch + 1, avg_loss)
 
+        if scheduler is not None:
+            scheduler.step()
+
         save_checkpoint(model, optimizer, avg_loss, epoch, last_path)
         
         try:
             logger.info('Running validation for current epoch...')
-            _, summary = evaluator.evaluate_checkpoint(
-                config,
-                checkpoint_path=last_path,
-                split='test',
-                num_subjects=num_subjects,
-                device=device,
-                show_progress=True,
-                progress_desc=f'Val {epoch+1}/{config["training"]["epochs"]}',
-                with_loss=True,
-            )
-            logger.info('Validation summary:')
-            for k, v in summary.items():
-                logger.info('  %s: %.4f', k, v)
-            
-            val_loss = summary.get('loss', float('inf'))
-            if val_loss < best_score:
-                best_score = val_loss
-                new_best_path = run_dir / f'best_epoch_{epoch+1:02d}_loss_{val_loss:.4f}.pth'
+            val_acc = evaluate_accuracy(model, config, device, num_subjects=num_subjects)
+            logger.info('Validation accuracy: %.4f', val_acc)
+
+            if val_acc > best_score:
+                best_score = val_acc
+                new_best_path = run_dir / f'best_epoch_{epoch+1:02d}_acc_{val_acc:.4f}.pth'
                 torch.save(torch.load(last_path, map_location='cpu', weights_only=False), new_best_path)
                 logger.info('New best checkpoint saved: %s', new_best_path)
                 
@@ -201,6 +226,37 @@ def save_checkpoint(model, optimizer, loss, epoch, path):
         'loss': loss,
     }, path)
     return path
+
+
+@torch.no_grad()
+def evaluate_accuracy(model, config, device, num_subjects=None):
+    # For gait recognition we evaluate using gallery/probe matching.
+    # Use the evaluator's embedding extraction and gallery/probe routines.
+    num_frames = config['data']['num_frames']
+    batch_size = config['training'].get('batch_size', 32)
+
+    dataset = CASIABPose(
+        split='test',
+        root=config['data']['root'],
+        sequence_length=num_frames,
+        use_augmentation=False,
+        num_subjects=num_subjects,
+    )
+
+    records, _ = evaluator.extract_embeddings(
+        model,
+        dataset,
+        device,
+        batch_size=batch_size,
+        num_frames=num_frames,
+        show_progress=False,
+        progress_desc='Val',
+        with_loss=False,
+    )
+
+    _, summary = evaluator.evaluate_gallery_probe(records)
+    # return mean recognition score (or 0.0 if missing)
+    return float(summary.get('mean', 0.0))
 
 
 if __name__ == '__main__':
