@@ -3,9 +3,9 @@ from pathlib import Path
 from functools import partial
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from tools.losses import nt_xent_loss
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from datasets.casia_b_pose import CASIABPose
@@ -53,11 +53,9 @@ def extract_embeddings(model, dataset, device, batch_size=32, num_frames=None, s
     
     records = {}
     model.eval()
-    criterion = nn.CrossEntropyLoss() if with_loss else None
     total_loss = 0.0
     processed_count = 0
     
-    # Create a dataloader that preserves original indices
     data_loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -78,11 +76,11 @@ def extract_embeddings(model, dataset, device, batch_size=32, num_frames=None, s
             
             logits, embeddings = model(batch_x, return_embedding=True)
 
-            if criterion is not None:
-                batch_loss = criterion(logits, batch_y).item()
-                total_loss += batch_loss
+            if with_loss:
+                batch_loss = nt_xent_loss(embeddings, batch_y, temperature=0.07)
+                total_loss += batch_loss.item()
                 if show_progress:
-                    batch_iterator.set_postfix(batch_loss=f'{batch_loss:.4f}')
+                    batch_iterator.set_postfix(batch_loss=f'{batch_loss.item():.4f}')
 
             # Store embeddings for each sample in the batch
             for i in range(batch_size_current):

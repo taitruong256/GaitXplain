@@ -3,7 +3,7 @@ model:
   name: GaitXplain
   in_channels: 3
   hidden_channels: 64
-  num_classes: 125
+  num_classes: 10 
   num_layers: 3
   dropout: 0.5
   max_hop: 3

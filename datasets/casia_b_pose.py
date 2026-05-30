@@ -79,7 +79,7 @@ class CASIABPose(InMemoryDataset):
                 
             data = Data(
                 x=torch.stack(keypoints),
-                y=int(subject_id),
+                y=int(subject_id) - 1,
                 angle=int(view_angle),
                 seq_num=int(sequence_num),
                 walking_status=int(walking_status)

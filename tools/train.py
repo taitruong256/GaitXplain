@@ -62,10 +62,15 @@ def train():
     device = torch.device(config['training']['device'])
     
     m_cfg = config['model']
+  
+    model_num_classes = m_cfg.get('num_classes')
+    if num_subjects is not None:
+        model_num_classes = num_subjects
+
     model = GaitXplain(
         in_channels=m_cfg['in_channels'],
         hidden_channels=m_cfg['hidden_channels'],
-        num_classes=m_cfg['num_classes'],
+        num_classes=model_num_classes,
         num_layers=m_cfg['num_layers'],
         dropout=m_cfg['dropout']
     ).to(device)
