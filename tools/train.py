@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from models import GaitXplain
+from models import GaitXplain, ProtoGCN
 from datasets.casia_b_pose import CASIABPose
 from tools import evaluate as evaluator
 from tools.run_utils import make_run_dir, save_config_snapshot, setup_run_logging
@@ -72,13 +72,30 @@ def train():
     if num_subjects is not None:
         model_num_classes = num_subjects
 
-    model = GaitXplain(
-        in_channels=m_cfg['in_channels'],
-        hidden_channels=m_cfg['hidden_channels'],
-        num_classes=model_num_classes,
-        num_layers=m_cfg['num_layers'],
-        dropout=m_cfg['dropout']
-    ).to(device)
+    model_name = m_cfg.get('name', 'GaitXplain')
+    if model_name.lower() == 'protogcn' or model_name.lower() == 'proto_gcn':
+        model = ProtoGCN(
+            graph_cfg=m_cfg.get('graph_cfg', {'dataset': config.get('dataset', 'coco')}),
+            in_channels=m_cfg.get('in_channels', 3),
+            base_channels=m_cfg.get('base_channels', 96),
+            ch_ratio=m_cfg.get('ch_ratio', 2),
+            num_stages=m_cfg.get('num_stages', 10),
+            inflate_stages=tuple(m_cfg.get('inflate_stages', (5, 8))),
+            down_stages=tuple(m_cfg.get('down_stages', (5, 8))),
+            data_bn_type=m_cfg.get('data_bn_type', 'VC'),
+            num_person=m_cfg.get('num_person', 1),
+            num_classes=model_num_classes,
+            dropout=m_cfg.get('dropout', 0.5),
+            num_prototype=m_cfg.get('num_prototype', 100),
+        ).to(device)
+    else:
+        model = GaitXplain(
+            in_channels=m_cfg.get('in_channels', 3),
+            hidden_channels=m_cfg.get('hidden_channels', 64),
+            num_classes=model_num_classes,
+            num_layers=m_cfg.get('num_layers', 3),
+            dropout=m_cfg.get('dropout', 0.5),
+        ).to(device)
     logger.info('%s', model)
     logger.info('Total parameters: %d', sum(p.numel() for p in model.parameters()))
     

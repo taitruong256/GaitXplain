@@ -9,17 +9,33 @@ from tools.losses import nt_xent_loss
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from datasets.casia_b_pose import CASIABPose
-from models import GaitXplain
+from models import GaitXplain, ProtoGCN
 
 
 def build_model(config):
     m_cfg = config['model']
+    model_name = m_cfg.get('name', 'GaitXplain')
+    if model_name.lower() == 'protogcn' or model_name.lower() == 'proto_gcn':
+        return ProtoGCN(
+            graph_cfg=m_cfg.get('graph_cfg', {'dataset': config.get('dataset', 'coco')}),
+            in_channels=m_cfg.get('in_channels', 3),
+            base_channels=m_cfg.get('base_channels', 96),
+            ch_ratio=m_cfg.get('ch_ratio', 2),
+            num_stages=m_cfg.get('num_stages', 10),
+            inflate_stages=tuple(m_cfg.get('inflate_stages', (5, 8))),
+            down_stages=tuple(m_cfg.get('down_stages', (5, 8))),
+            data_bn_type=m_cfg.get('data_bn_type', 'VC'),
+            num_person=m_cfg.get('num_person', 1),
+            num_classes=m_cfg.get('num_classes'),
+            dropout=m_cfg.get('dropout', 0.5),
+            num_prototype=m_cfg.get('num_prototype', 100),
+        )
     return GaitXplain(
-        in_channels=m_cfg['in_channels'],
-        hidden_channels=m_cfg['hidden_channels'],
-        num_classes=m_cfg['num_classes'],
-        num_layers=m_cfg['num_layers'],
-        dropout=m_cfg['dropout'],
+        in_channels=m_cfg.get('in_channels', 3),
+        hidden_channels=m_cfg.get('hidden_channels', 64),
+        num_classes=m_cfg.get('num_classes'),
+        num_layers=m_cfg.get('num_layers', 3),
+        dropout=m_cfg.get('dropout', 0.5),
     )
 
 
@@ -176,7 +192,13 @@ def evaluate_checkpoint(
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
 
-    dataset = CASIABPose(split=split, root=config['data']['root'], num_subjects=num_subjects)
+    dataset = CASIABPose(
+        split=split,
+        root=config['data']['root'],
+        sequence_length=num_frames,
+        use_augmentation=False,
+        num_subjects=num_subjects,
+    )
     records, avg_loss = extract_embeddings(
         model,
         dataset,

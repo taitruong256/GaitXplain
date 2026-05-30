@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--out-dir", default="data/output")
     args = parser.parse_args()
 
-    from models.model import GaitXplain
+    from models.simple_model import GaitXplain
 
     model = GaitXplain()
     ckpt = torch.load(args.checkpoint, map_location="cpu")

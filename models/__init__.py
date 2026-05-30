@@ -1,3 +1,4 @@
-from .model import GaitXplain
+from .simple_model import GaitXplain
+from .protogcn import ProtoGCN
 
-__all__ = ['GaitXplain']
+__all__ = ['GaitXplain', 'ProtoGCN']
