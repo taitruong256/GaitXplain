@@ -5,6 +5,7 @@ from tqdm import tqdm
 import numpy as np 
 import torch
 import warnings
+from torch_geometric.loader import DataLoader
 
 from datasets.graph import Graph
 from transforms.augmentation import (
@@ -157,15 +158,15 @@ class CASIABPose(InMemoryDataset):
         data, slices = self.collate(data_list)
         torch.save((data, slices), self.processed_paths[0])
 
-if __name__ == '__main__':
-    for split in ['train', 'test']:
-        dataset = CASIABPose(split=split)
-        print(f'[{split}] Number of samples: {len(dataset)}')
-        print(f'Shape of x: {dataset[0].x.shape}, y: {dataset[0].y.shape}')
-
-        max_x = []
-        max_y = []
-        for idx, item in enumerate(dataset):
-            max_x.append(item.x[:, 0].max().item())
-            max_y.append(item.x[:, 1].max().item())
-        print(f'[{split}] Max x: {max(max_x)}, Max y: {max(max_y)}')
+def make_predict_dataloader(
+    root: str = 'data',
+    split: str = 'test',
+    batch_size: int = 1,
+    num_workers: int = 0,
+    sequence_length: int = 99,
+    use_augmentation: bool | None = None,
+    num_subjects: Optional[int] = None,
+    shuffle: bool = False,
+):
+    dataset = CASIABPose(root=root, split=split, sequence_length=sequence_length, use_augmentation=use_augmentation, num_subjects=num_subjects)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
