@@ -1,0 +1,42 @@
+dataset: coco
+model:
+  name: ProtoGCN
+  graph_cfg:
+    dataset: coco
+  in_channels: 3
+  base_channels: 64
+  ch_ratio: 2
+  num_stages: 10
+  inflate_stages: [5, 8]
+  down_stages: [5, 8]
+  data_bn_type: VC
+  num_person: 1
+  num_prototype: 100
+  num_classes: 10
+  dropout: 0.5
+
+data:
+  num_frames: 60 
+  num_nodes: 17
+  root: data
+
+training:
+  output_root: output
+  checkpoint: output/model.pth
+  batch_size: 32
+  learning_rate: 0.001
+  epochs: 10 
+  device: cpu
+  num_workers: 4
+  save_interval: 10
+  num_subjects: 10
+  use_augmentation: true
+
+inference:
+  output_root: output
+  device: cpu
+  checkpoint: output/model.pth
+  output: output/result_inference.json
+  split: test
+  sample_index: 0
+  num_subjects: 10 
