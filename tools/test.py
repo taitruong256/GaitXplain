@@ -21,8 +21,9 @@ def find_latest_best_checkpoint(output_root: str) -> Path | None:
     root = Path(output_root)
     train_runs = sorted(root.glob('train_*'), key=lambda p: p.stat().st_mtime, reverse=True)
     for run_dir in train_runs:
-        best_path = run_dir / 'best.pth'
-        if best_path.exists():
+        best_checkpoints = list(run_dir.glob('best_epoch_*.pth'))
+        if best_checkpoints:
+            best_path = max(best_checkpoints, key=lambda p: p.stat().st_mtime)
             return best_path
     return None
 
@@ -63,6 +64,9 @@ def main():
         split='test',
         num_subjects=num_subjects,
         device=device,
+        show_progress=True,
+        progress_desc='Test',
+        with_loss=True,
     )
 
     logger.info('Test summary:')

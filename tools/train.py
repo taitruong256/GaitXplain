@@ -5,12 +5,37 @@ import torch.nn as nn
 import yaml
 from pathlib import Path
 import sys
+from functools import partial
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from models import GaitXplain
 from datasets.casia_b_pose import CASIABPose
 from tools import evaluate as evaluator
 from tools.run_utils import make_run_dir, save_config_snapshot, setup_run_logging
+
+
+def collate_pose_batch(batch, num_frames):
+    xs = []
+    ys = []
+    for data in batch:
+        x = data.x
+        t = x.shape[0]
+
+        if t < num_frames:
+            if t > 0:
+                pad = x[-1:].repeat(num_frames - t, 1, 1)
+            else:
+                pad = torch.zeros((num_frames, x.shape[1], x.shape[2]), dtype=x.dtype)
+            x = torch.cat([x, pad], dim=0)
+        elif t > num_frames:
+            x = x[:num_frames]
+
+        xs.append(x)
+        ys.append(int(data.y.item()) if hasattr(data.y, 'item') else int(data.y))
+
+    return torch.stack(xs, dim=0), torch.tensor(ys, dtype=torch.long)
 
 
 def train():
@@ -52,25 +77,36 @@ def train():
         root=config['data']['root'],
         num_subjects=num_subjects,
     )
-    dataset_val = CASIABPose(split='test', root=config['data']['root'], num_subjects=num_subjects)
+    batch_size = config['training'].get('batch_size', 32)
+    num_workers = config['training'].get('num_workers', 0)
+    num_frames = config['data']['num_frames']
+    train_loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=partial(collate_pose_batch, num_frames=num_frames),
+    )
+
     logger.info('Number of training samples: %d', len(dataset))
+    logger.info('Batch size: %d | Num batches: %d', batch_size, len(train_loader))
     for i in range(5):
         logger.info('Sample %d - x shape: %s, y: %s', i, dataset[i].x.shape, dataset[i].y)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
     criterion = nn.CrossEntropyLoss()
     best_score = float('-inf')
-    best_path = run_dir / 'best.pth'
+    best_path = None
     last_path = run_dir / 'last.pth'
     
     for epoch in range(config['training']['epochs']):
         model.train()
         train_loss = 0.0
-        
-        for idx in range(len(dataset)):
-            data = dataset[idx]
-            x = data.x.unsqueeze(0).to(device)
-            y = torch.tensor([data.y], dtype=torch.long).to(device)
+
+        pbar = tqdm(train_loader, desc=f'Train {epoch+1}/{config["training"]["epochs"]}', unit='batch')
+        for batch_idx, (x, y) in enumerate(pbar, start=1):
+            x = x.to(device)
+            y = y.to(device)
             
             optimizer.zero_grad()
             logits = model(x)
@@ -79,11 +115,10 @@ def train():
             optimizer.step()
             
             train_loss += loss.item()
-            
-            if (idx + 1) % 50 == 0:
-                logger.info('[%d/%d] Sample %d/%d: %.4f', epoch + 1, config['training']['epochs'], idx + 1, len(dataset), loss.item())
+
+            pbar.set_postfix(batch_loss=f'{loss.item():.4f}', avg_loss=f'{(train_loss / batch_idx):.4f}')
         
-        avg_loss = train_loss / len(dataset)
+        avg_loss = train_loss / max(len(train_loader), 1)
         logger.info('Epoch %d - Loss: %.4f', epoch + 1, avg_loss)
 
         save_checkpoint(model, optimizer, avg_loss, epoch, last_path)
@@ -96,18 +131,24 @@ def train():
                 split='test',
                 num_subjects=num_subjects,
                 device=device,
+                show_progress=True,
+                progress_desc=f'Val {epoch+1}/{config["training"]["epochs"]}',
+                with_loss=True,
             )
             logger.info('Validation summary:')
             for k, v in summary.items():
                 logger.info('  %s: %.4f', k, v)
             if summary['mean'] > best_score:
                 best_score = summary['mean']
+                val_loss = summary.get('loss', 0.0)
+                best_path = run_dir / f'best_epoch_{epoch+1:02d}_loss_{val_loss:.4f}.pth'
                 torch.save(torch.load(last_path, map_location='cpu', weights_only=False), best_path)
                 logger.info('New best checkpoint saved: %s', best_path)
         except Exception as e:
             logger.exception('Validation failed: %s', e)
 
-    if not best_path.exists():
+    if best_path is None:
+        best_path = run_dir / 'best_epoch_final.pth'
         torch.save(torch.load(last_path, map_location='cpu', weights_only=False), best_path)
 
     logger.info('Run dir: %s', run_dir)
