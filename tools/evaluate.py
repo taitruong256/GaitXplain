@@ -1,19 +1,11 @@
-import argparse
-import json
 import sys
 from pathlib import Path
 
 import torch
-import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from datasets.casia_b_pose import CASIABPose
 from models import GaitXplain
-
-
-def load_config(path):
-    with open(path) as f:
-        return yaml.safe_load(f)
 
 
 def build_model(config):
@@ -103,38 +95,12 @@ def evaluate_gallery_probe(records):
     return accuracy_flat, summary
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', default='config/casia_b.yaml')
-    parser.add_argument('--checkpoint', default='output/model.pth')
-    parser.add_argument('--num-subjects', type=int, default=None)
-    parser.add_argument('--output', default=None)
-    args = parser.parse_args()
-
-    config = load_config(args.config)
-    device = torch.device(config['inference']['device'])
-
+def evaluate_checkpoint(config, checkpoint_path, split='test', num_subjects=None, device=None):
+    device = device or torch.device(config.get('inference', {}).get('device', 'cpu'))
     model = build_model(config).to(device)
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
 
-    dataset = CASIABPose(split='test', root=config['data']['root'], num_subjects=args.num_subjects)
+    dataset = CASIABPose(split=split, root=config['data']['root'], num_subjects=num_subjects)
     records = extract_embeddings(model, dataset, device)
-    accuracy_flat, summary = evaluate_gallery_probe(records)
-
-    print('Gallery/probe summary:')
-    for key, value in summary.items():
-        print(f'  {key}: {value:.4f}')
-
-    if args.output:
-        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        with open(args.output, 'w') as f:
-            json.dump({
-                'summary': summary,
-                'accuracy_flat': accuracy_flat.tolist(),
-            }, f, indent=2)
-        print(f'Saved: {args.output}')
-
-
-if __name__ == '__main__':
-    main()
+    return evaluate_gallery_probe(records)

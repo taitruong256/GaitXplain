@@ -1,4 +1,5 @@
 import argparse
+import logging
 import torch
 import torch.nn as nn
 import yaml
@@ -9,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from models import GaitXplain
 from datasets.casia_b_pose import CASIABPose
 from tools import evaluate as evaluator
+from tools.run_utils import make_run_dir, save_config_snapshot, setup_run_logging
 
 
 def train():
@@ -20,13 +22,18 @@ def train():
     
     with open(args.config) as f:
         config = yaml.safe_load(f)
-    
-    output_path = args.output or config['training'].get('checkpoint') or 'output/model.pth'
+
+    output_root = args.output or config['training'].get('output_root') or 'output'
+    run_dir = make_run_dir(output_root, 'train')
+    logger = setup_run_logging(run_dir)
+    save_config_snapshot(config, run_dir)
+    logger.info('Run dir: %s', run_dir)
+    logger.info('Config file: %s', args.config)
+
     num_subjects = args.num_subjects
     if num_subjects is None:
         num_subjects = config['training'].get('num_subjects')
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     device = torch.device(config['training']['device'])
     
     m_cfg = config['model']
@@ -37,20 +44,24 @@ def train():
         num_layers=m_cfg['num_layers'],
         dropout=m_cfg['dropout']
     ).to(device)
-    print(model)
-    print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+    logger.info('%s', model)
+    logger.info('Total parameters: %d', sum(p.numel() for p in model.parameters()))
     
     dataset = CASIABPose(
         split='train',
         root=config['data']['root'],
         num_subjects=num_subjects,
     )
-    print(f"Number of training samples: {len(dataset)}")
+    dataset_val = CASIABPose(split='test', root=config['data']['root'], num_subjects=num_subjects)
+    logger.info('Number of training samples: %d', len(dataset))
     for i in range(5):
-        print(f"Sample {i} - x shape: {dataset[i].x.shape}, y: {dataset[i].y}")
+        logger.info('Sample %d - x shape: %s, y: %s', i, dataset[i].x.shape, dataset[i].y)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
     criterion = nn.CrossEntropyLoss()
+    best_score = float('-inf')
+    best_path = run_dir / 'best.pth'
+    last_path = run_dir / 'last.pth'
     
     for epoch in range(config['training']['epochs']):
         model.train()
@@ -70,51 +81,48 @@ def train():
             train_loss += loss.item()
             
             if (idx + 1) % 50 == 0:
-                print(f"[{epoch+1}/{config['training']['epochs']}] Sample {idx+1}/{len(dataset)}: {loss.item():.4f}")
+                logger.info('[%d/%d] Sample %d/%d: %.4f', epoch + 1, config['training']['epochs'], idx + 1, len(dataset), loss.item())
         
         avg_loss = train_loss / len(dataset)
-        print(f"Epoch {epoch+1} - Loss: {avg_loss:.4f}")
-        
-        if (epoch + 1) % config['training']['save_interval'] == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_loss
-            }, output_path)
-            print(f"Saved: {output_path}")
+        logger.info('Epoch %d - Loss: %.4f', epoch + 1, avg_loss)
 
+        save_checkpoint(model, optimizer, avg_loss, epoch, last_path)
+        
         try:
-            print("Running validation on saved checkpoint...")
-            evaluator_config = config
-            device_eval = device
-            model_eval = evaluator.build_model(evaluator_config).to(device_eval)
-            ckpt = torch.load(output_path, map_location=device_eval, weights_only=False)
-            model_eval.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
-            dataset_val = CASIABPose(split='test', root=config['data']['root'], num_subjects=num_subjects)
-            records = evaluator.extract_embeddings(model_eval, dataset_val, device_eval)
-            _, summary = evaluator.evaluate_gallery_probe(records)
-            print('Validation summary (on save):')
+            logger.info('Running validation for current epoch...')
+            _, summary = evaluator.evaluate_checkpoint(
+                config,
+                checkpoint_path=last_path,
+                split='test',
+                num_subjects=num_subjects,
+                device=device,
+            )
+            logger.info('Validation summary:')
             for k, v in summary.items():
-                print(f"  {k}: {v:.4f}")
+                logger.info('  %s: %.4f', k, v)
+            if summary['mean'] > best_score:
+                best_score = summary['mean']
+                torch.save(torch.load(last_path, map_location='cpu', weights_only=False), best_path)
+                logger.info('New best checkpoint saved: %s', best_path)
         except Exception as e:
-            print(f"Validation failed: {e}")
-            
-        try:
-            print("Running final validation on trained model...")
-            evaluator_config = config
-            device_eval = device
-            model_eval = evaluator.build_model(evaluator_config).to(device_eval)
-            ckpt = torch.load(output_path, map_location=device_eval, weights_only=False)
-            model_eval.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
-            dataset_val = CASIABPose(split='test', root=config['data']['root'], num_subjects=num_subjects)
-            records = evaluator.extract_embeddings(model_eval, dataset_val, device_eval)
-            _, summary = evaluator.evaluate_gallery_probe(records)
-            print('Final validation summary:')
-            for k, v in summary.items():
-                print(f"  {k}: {v:.4f}")
-        except Exception as e:
-            print(f"Final validation failed: {e}")
+            logger.exception('Validation failed: %s', e)
+
+    if not best_path.exists():
+        torch.save(torch.load(last_path, map_location='cpu', weights_only=False), best_path)
+
+    logger.info('Run dir: %s', run_dir)
+    logger.info('Last checkpoint: %s', last_path)
+    logger.info('Best checkpoint: %s', best_path)
+
+
+def save_checkpoint(model, optimizer, loss, epoch, path):
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss,
+    }, path)
+    return path
 
 
 if __name__ == '__main__':

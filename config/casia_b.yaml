@@ -15,6 +15,7 @@ data:
   root: data
 
 training:
+  output_root: output
   checkpoint: output/model.pth
   batch_size: 32
   learning_rate: 0.001
@@ -25,6 +26,7 @@ training:
   num_subjects: 10
 
 inference:
+  output_root: output
   device: cpu
   checkpoint: output/model.pth
   output: output/result_inference.json

@@ -1,15 +1,15 @@
 import argparse
+import logging
 import json
 import sys
 from pathlib import Path
 
 import torch
 import yaml
-import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from datasets.casia_b_pose import CASIABPose
-from models import GaitXplain
+from tools.run_utils import make_run_dir, save_config_snapshot, setup_run_logging
+from tools import evaluate as evaluator
 
 
 def load_config(path):
@@ -17,28 +17,14 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
-def build_model(config):
-    m_cfg = config['model']
-    return GaitXplain(
-        in_channels=m_cfg['in_channels'],
-        hidden_channels=m_cfg['hidden_channels'],
-        num_classes=m_cfg['num_classes'],
-        num_layers=m_cfg['num_layers'],
-        dropout=m_cfg['dropout']
-    )
-
-
-def preprocess(keypoints, max_frames):
-    if keypoints.ndim == 2:
-        keypoints = keypoints[np.newaxis, :, :]
-
-    T = keypoints.shape[0]
-    if T < max_frames:
-        keypoints = np.pad(keypoints, ((0, max_frames-T), (0, 0), (0, 0)), mode='edge')
-    elif T > max_frames:
-        keypoints = keypoints[:max_frames]
-
-    return torch.from_numpy(keypoints.astype(np.float32)).unsqueeze(0)
+def find_latest_best_checkpoint(output_root: str) -> Path | None:
+    root = Path(output_root)
+    train_runs = sorted(root.glob('train_*'), key=lambda p: p.stat().st_mtime, reverse=True)
+    for run_dir in train_runs:
+        best_path = run_dir / 'best.pth'
+        if best_path.exists():
+            return best_path
+    return None
 
 
 def main():
@@ -46,55 +32,52 @@ def main():
     parser.add_argument('--config', default='config/casia_b.yaml')
     parser.add_argument('--checkpoint', default=None)
     parser.add_argument('--output', default=None)
-    parser.add_argument('--split', default=None)
-    parser.add_argument('--sample-index', type=int, default=None)
     parser.add_argument('--num-subjects', type=int, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
     i_cfg = config.get('inference', {})
     device = torch.device(i_cfg.get('device', 'cpu'))
-    checkpoint_path = args.checkpoint or i_cfg.get('checkpoint') or config['training'].get('checkpoint')
-    output_path = args.output if args.output is not None else i_cfg.get('output')
-    split = args.split or i_cfg.get('split', 'test')
-    sample_index = args.sample_index if args.sample_index is not None else int(i_cfg.get('sample_index', 0))
+    run_root = i_cfg.get('output_root') or config['training'].get('output_root') or 'output'
+    checkpoint_path = args.checkpoint or i_cfg.get('checkpoint') or find_latest_best_checkpoint(run_root)
+    output_path = args.output if args.output is not None else None
     num_subjects = args.num_subjects if args.num_subjects is not None else i_cfg.get('num_subjects')
 
-    model = build_model(config).to(device)
-    if not Path(checkpoint_path).exists():
-        print(f"Error: checkpoint not found: {checkpoint_path}")
+    run_dir = make_run_dir(run_root, 'test')
+    logger = setup_run_logging(run_dir)
+    save_config_snapshot(config, run_dir)
+    logger.info('Run dir: %s', run_dir)
+    logger.info('Checkpoint: %s', checkpoint_path)
+
+    if checkpoint_path is None:
+        logger.error('Error: no best checkpoint found under %s', run_root)
         return
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
-
-    dataset = CASIABPose(split=split, root=config['data']['root'], num_subjects=num_subjects)
-    if sample_index < 0 or sample_index >= len(dataset):
-        print(f"Error: sample-index {sample_index} out of range for split '{split}'")
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        logger.error('Error: checkpoint not found: %s', checkpoint_path)
         return
 
-    data = dataset[sample_index]
-    keypoints = data.x.numpy()
-    import numpy as np
-    x = preprocess(keypoints, config['data']['num_frames']).to(device)
+    _, summary = evaluator.evaluate_checkpoint(
+        config,
+        checkpoint_path=checkpoint_path,
+        split='test',
+        num_subjects=num_subjects,
+        device=device,
+    )
 
-    model.eval()
-    with torch.no_grad():
-        logits = model(x)
+    logger.info('Test summary:')
+    for key, value in summary.items():
+        logger.info('  %s: %.4f', key, value)
+    logger.info('summary=%s', json.dumps(summary))
 
-    probs = torch.softmax(logits, dim=1)
-    pred_class = logits.argmax(dim=1).item()
-    confidence = probs[0, pred_class].item()
-
-    print(f"\nPredicted: {pred_class}, Confidence: {confidence:.4f}")
-
-    if output_path:
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w') as f:
-            json.dump({
-                'predicted_class': int(pred_class),
-                'confidence': float(confidence)
-            }, f, indent=2)
-        print(f"Saved: {output_path}")
+    final_output = Path(output_path) if output_path is not None else run_dir / 'result.json'
+    with open(final_output, 'w') as f:
+        json.dump({
+            'checkpoint': str(checkpoint_path),
+            'summary': summary,
+        }, f, indent=2)
+    logger.info('Saved: %s', final_output)
+    logger.info('output=%s', final_output)
 
 
 if __name__ == '__main__':
